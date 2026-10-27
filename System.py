@@ -8,7 +8,7 @@ from flask import Flask
 from threading import Thread
 
 # -------------------------------------------------------------
-# 🌐 Render 7/24 Uykuyu Önleme (Keep-Alive) Altyapısı
+# 🌐 Render 7/24 Uykuyu Önleme (Keep-Alive) ve Dinamik Port Altyapısı
 # -------------------------------------------------------------
 app = Flask('')
 
@@ -17,7 +17,9 @@ def home():
     return "StormSystem 7/24 Aktif ve Çalışıyor!"
 
 def run():
-    app.run(host='0.0.0.0', port=8080)
+    # Render'ın atadığı dinamik portu okuyoruz (Port hata uyarısını çözer)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
     t = Thread(target=run)
@@ -69,7 +71,7 @@ def add_staff_stat(staff_id: str):
     save_data(data)
 
 # -------------------------------------------------------------
-# 🛡️ 1. /systemLogKurulum Komutu
+# 🛡️ 1. /systemlogkurulum Komutu
 # -------------------------------------------------------------
 @bot.tree.command(name="systemlogkurulum", description="Kapsamlı sistem log kanallarını otomatik kurar.")
 @app_commands.checks.has_permissions(administrator=True)
