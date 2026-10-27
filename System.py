@@ -3,7 +3,28 @@ from discord.ext import commands
 import json
 import os
 import datetime
+from flask import Flask
+from threading import Thread
 
+# -------------------------------------------------------------
+# 🌐 Render 7/24 Uykuyu Önleme (Keep-Alive) Altyapısı
+# -------------------------------------------------------------
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "StormSystem 7/24 Aktif ve Çalışıyor!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# -------------------------------------------------------------
+# 🤖 Discord Bot Başlangıç ve Intent Ayarları
+# -------------------------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -426,10 +447,15 @@ async def system_ses_ayril(ctx):
             embed.set_footer(text="StormSystem | Ses Log Sistemi")
             await log_channel.send(embed=embed)
     else:
-            await ctx.send("⚠️ Bot halihazırda bir ses kanalında bulunmuyor.")
+        await ctx.send("⚠️ Bot halihazırda bir ses kanalında bulunmuyor.")
 
 @bot.event
 async def on_ready():
     print(f"{bot.user} olarak giriş yapıldı. StormSystem tamamen aktif!")
 
-bot.run(os.getenv("DISCORD_TOKEN"))
+# -------------------------------------------------------------
+# 🚀 Botu Başlatma (Flask + Discord Bot)
+# -------------------------------------------------------------
+if __name__ == "__main__":
+    keep_alive()
+    bot.run(os.getenv("DISCORD_TOKEN"))
