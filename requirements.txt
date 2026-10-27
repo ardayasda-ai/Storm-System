@@ -1,0 +1,6 @@
+flask
+discord.py[voice]
+aiohttp
+certifi
+urllib3
+PyNaCl
