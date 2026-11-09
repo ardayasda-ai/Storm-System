@@ -4,6 +4,9 @@ from discord import app_commands
 import json
 import os
 import datetime
+import asyncio
+import random
+import io
 from flask import Flask
 from threading import Thread
 
@@ -75,6 +78,113 @@ def add_staff_stat(staff_id: str):
         data["stats"] = {}
     data["stats"][staff_id] = data["stats"].get(staff_id, 0) + 1
     save_data(data)
+
+# -------------------------------------------------------------
+# 🎉 ÇEKİLİŞ SİSTEMİ ALTYAPISI
+# -------------------------------------------------------------
+active_giveaways = {}
+
+class GiveawayView(discord.ui.View):
+    def __init__(self, prize: str, winners_count: int, end_time: datetime.datetime):
+        super().__init__(timeout=None)
+        self.prize = prize
+        self.winners_count = winners_count
+        self.end_time = end_time
+        self.participants = set()
+
+    @discord.ui.button(label="Katıl (0)", style=discord.ButtonStyle.success, emoji="🎉", custom_id="giveaway_join")
+    async def join_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id in self.participants:
+            self.participants.remove(interaction.user.id)
+            button.label = f"Katıl ({len(self.participants)})"
+            await interaction.response.edit_message(view=self)
+            await interaction.followup.send("⚠️ Çekiliş katılımınız iptal edildi.", ephemeral=True)
+        else:
+            self.participants.add(interaction.user.id)
+            button.label = f"Katıl ({len(self.participants)})"
+            await interaction.response.edit_message(view=self)
+            await interaction.followup.send("🎉 Çekilişe başarıyla katıldınız! Bol şans.", ephemeral=True)
+
+@bot.tree.command(name="cekilisbaşlat", description="Sunucuda yeni bir çekiliş başlatır.")
+@app_commands.checks.has_permissions(administrator=True)
+async def cekilis_baslat(interaction: discord.Interaction, dakikasuresi: int, kazanansayisi: int, odul: str):
+    if dakikasuresi <= 0 or kazanansayisi <= 0:
+        await interaction.response.send_message("❌ Süre ve kazanan sayısı 0'dan büyük olmalıdır.", ephemeral=True)
+        return
+
+    end_time = discord.utils.utcnow() + datetime.timedelta(minutes=dakikasuresi)
+    timestamp = int(end_time.timestamp())
+
+    embed = discord.Embed(
+        title=f"🎉 **ÇEKİLİŞ: {odul.upper()}** 🎉",
+        description=(
+            f"🎁 **Ödül:** `{odul}`\n"
+            f"👑 **Kazanan Sayısı:** `{kazanansayisi}`\n"
+            f"⏱️ **Bitiş Zamanı:** <t:{timestamp}:R> (<t:{timestamp}:F>)\n"
+            f"👤 **Düzenleyen:** {interaction.user.mention}\n\n"
+            f"Katılmak için aşağıdaki **Katıl** butonuna tıklayın!"
+        ),
+        color=discord.Color.gold()
+    )
+    embed.set_footer(text="discord.gg/stormpack • Stormpack Çekiliş Sistemi")
+
+    view = GiveawayView(prize=odul, winners_count=kazanansayisi, end_time=end_time)
+    await interaction.response.send_message("✅ Çekiliş başarıyla başlatıldı!", ephemeral=True)
+    msg = await interaction.channel.send(embed=embed, view=view)
+
+    active_giveaways[msg.id] = {
+        "view": view,
+        "message": msg,
+        "prize": odul,
+        "winners_count": kazanansayisi,
+        "channel_id": interaction.channel_id
+    }
+
+    await asyncio.sleep(dakikasuresi * 60)
+
+    if msg.id in active_giveaways:
+        await finish_giveaway(msg.id)
+
+async def finish_giveaway(message_id: int):
+    giveaway = active_giveaways.pop(message_id, None)
+    if not giveaway:
+        return
+
+    view = giveaway["view"]
+    msg = giveaway["message"]
+    prize = giveaway["prize"]
+    winners_count = giveaway["winners_count"]
+    participants = list(view.participants)
+
+    for item in view.children:
+        item.disabled = True
+
+    if not participants:
+        embed = discord.Embed(
+            title=f"🎉 **ÇEKİLİŞ SONLANDI: {prize.upper()}**",
+            description="❌ Yeterli katılım olmadığı için kazanan seçilemedi.",
+            color=discord.Color.red()
+        )
+        await msg.edit(embed=embed, view=view)
+        await msg.channel.send(f"⚠️ **{prize}** çekilişine kimse katılmadığı için kazanan olmadı.")
+        return
+
+    winners_ids = random.sample(participants, min(len(participants), winners_count))
+    winners_mentions = [f"<@{uid}>" for uid in winners_ids]
+
+    embed = discord.Embed(
+        title=f"🎉 **ÇEKİLİŞ SONLANDI: {prize.upper()}** 🎉",
+        description=(
+            f"🎁 **Ödül:** `{prize}`\n"
+            f"🏆 **Kazanan(lar):** {', '.join(winners_mentions)}\n"
+            f"👥 **Toplam Katılım:** `{len(participants)}`"
+        ),
+        color=discord.Color.green()
+    )
+    embed.set_footer(text="discord.gg/stormpack • Tebrikler!")
+
+    await msg.edit(embed=embed, view=view)
+    await msg.channel.send(f"🎉 Tebrikler {', '.join(winners_mentions)}! **{prize}** çekilişini kazandınız!")
 
 # -------------------------------------------------------------
 # 🛡️ 1. /systemlogkurulum & /logsifirla Komutları
@@ -283,69 +393,83 @@ async def on_member_remove(member):
         await log_chan.send(embed=log_emb)
 
 # -------------------------------------------------------------
-# 🎫 5. /ticketkurulum & /ticketpanelsifirla ve Gelişmiş Ticket Paneli
+# 🎫 5. /ticketkurulum & Dropdown / Menülü Sistem
 # -------------------------------------------------------------
-class TicketSelectView(discord.ui.View):
+class TicketDropdown(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Satın Alım & Sipariş", description="Ürün satın alma ve ödeme işlemleri.", emoji="💵", value="ticket_satin_alim"),
+            discord.SelectOption(label="Ürün Teslimatı & Kurulum", description="Satın alınan ürünlerin teslimatı ve teknik kurulumu.", emoji="🎟️", value="ticket_teslimat"),
+            discord.SelectOption(label="Teknik Destek & Kurulum", description="Bot kurulumu, panel erişimi ve teknik sorunlar.", emoji="🛠️", value="ticket_teknik"),
+            discord.SelectOption(label="Genel Destek & Soru", description="Mağaza ve ürünlerle ilgili genel sorularınız.", emoji="🧳", value="ticket_genel"),
+            discord.SelectOption(label="Seçim Sıfırla", description="Sadece seçiminizi sıfırlar.", emoji="🗑️", value="ticket_reset")
+        ]
+        super().__init__(placeholder="🛒 Destek almak istediğiniz konuyu seçin...", min_values=1, max_values=1, options=options, custom_id="ticket_dropdown")
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "ticket_reset":
+            await interaction.response.send_message("🔄 Seçiminiz sıfırlandı.", ephemeral=True)
+            return
+        
+        category_map = {
+            "ticket_satin_alim": "Satın Alım & Sipariş",
+            "ticket_teslimat": "Ürün Teslimatı & Kurulum",
+            "ticket_teknik": "Teknik Destek & Kurulum",
+            "ticket_genel": "Genel Destek & Soru"
+        }
+        cat_name = category_map.get(self.values[0], "Genel Destek")
+        await create_ticket_channel(interaction, cat_name)
+
+class TicketDropView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+        self.add_item(TicketDropdown())
 
-    @discord.ui.button(label="Genel Destek", style=discord.ButtonStyle.primary, emoji="🛠️", custom_id="ticket_genel")
-    async def genel_destek(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.create_ticket(interaction, "Genel Destek")
+async def create_ticket_channel(interaction: discord.Interaction, category_name: str):
+    guild = interaction.guild
+    member = interaction.user
+    ticket_id = get_next_ticket_id()
 
-    @discord.ui.button(label="Satın Alım", style=discord.ButtonStyle.success, emoji="💸", custom_id="ticket_satin_alim")
-    async def satin_alim(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.create_ticket(interaction, "Satın Alım")
-
-    @discord.ui.button(label="Partnerlik", style=discord.ButtonStyle.secondary, emoji="🤝", custom_id="ticket_partner")
-    async def partnerlik(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.create_ticket(interaction, "Partnerlik")
-
-    async def create_ticket(self, interaction: discord.Interaction, category_name: str):
-        guild = interaction.guild
-        member = interaction.user
-        ticket_id = get_next_ticket_id()
-
-        category = discord.utils.get(guild.categories, name="🎫 | Destek Talepleri")
-        if not category:
-            overwrites_cat = {
-                guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
-                guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-            }
-            category = await guild.create_category("🎫 | Destek Talepleri", overwrites=overwrites_cat)
-
-        storm_team = discord.utils.get(guild.roles, name="Storm Team")
-        
-        overwrites_channel = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+    category = discord.utils.get(guild.categories, name="🎫 | Destek Talepleri")
+    if not category:
+        overwrites_cat = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
             guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
-        if storm_team:
-            overwrites_channel[storm_team] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        category = await guild.create_category("🎫 | Destek Talepleri", overwrites=overwrites_cat)
 
-        channel_name = f"destek-{ticket_id}"
-        ticket_channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites_channel)
+    storm_team = discord.utils.get(guild.roles, name="Storm Team")
+    
+    overwrites_channel = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    }
+    if storm_team:
+        overwrites_channel[storm_team] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
 
-        embed = discord.Embed(title=f"🎫 Destek Talebi #{ticket_id}", color=discord.Color.dark_theme())
-        embed.description = (
-            f"✨ Merhaba {member.mention}, destek talebiniz başarıyla oluşturuldu!\n\n"
-            f"📌 **Destek Bilgileri ve Kurallar**\n"
-            f"• 🆔 **Destek ID:** `#{ticket_id}`\n"
-            f"• 📁 **Kategori:** `{category_name}`\n"
-            f"• ⏱️ **Oluşturulma Zamanı:** <t:{int(interaction.created_at.timestamp())}:F>\n"
-            f"• 🛡️ **Ortalama Yanıt Süresi:** `2 - 5 dakika`\n\n"
-            f"⚠️ Lütfen sorununuzu veya talebinizi detaylı bir şekilde aşağıya yazarak yetkili ekibimizin size dönüş yapmasını bekleyin.\n\n"
-            f"🛡️ **Destek Durumu**\n"
-            f"```Yetkili bekleniyor...```"
-        )
-        if member.avatar:
-            embed.set_thumbnail(url=member.avatar.url)
-        embed.set_footer(text="Stormpack Destek Güvenlik ve Yönetim Sistemi")
+    channel_name = f"destek-{ticket_id}"
+    ticket_channel = await guild.create_text_channel(channel_name, category=category, overwrites=overwrites_channel)
 
-        view = TicketManagementView(member.id, ticket_id, category_name)
-        await ticket_channel.send(embed=embed, view=view)
-        await interaction.response.send_message(f"✅ Destek talebiniz oluşturuldu: {ticket_channel.mention}", ephemeral=True)
+    embed = discord.Embed(
+        title=f"🎫 #{ticket_id} - {member.name} Destek Talebi",
+        color=discord.Color.dark_theme()
+    )
+    embed.description = (
+        f"👤 {member.mention} tarafından <t:{int(interaction.created_at.timestamp())}:F> tarihinde yeni bir destek talebi oluşturuldu.\n\n"
+        f"🛡️ **Sorumlu Yetkili:** Sahiplenilmesi bekleniyor...\n"
+        f"👤 **Ticket Açan:** {member.mention} (`{member.id}`)\n"
+        f"📁 **Ticket Kategorisi:** `{category_name}`\n"
+        f"⏱️ **Ortalama Cevap Süresi:** `2 - 5 Dakika`\n\n"
+        f"⚠️ Lütfen sorununuzu detaylı bir şekilde yazarak yetkili ekibimizin size dönüş yapmasını bekleyin."
+    )
+    if member.avatar:
+        embed.set_thumbnail(url=member.avatar.url)
+    embed.set_footer(text="StormPack | Destek ve Güvenlik Sistemi")
+
+    view = TicketManagementView(member.id, ticket_id, category_name)
+    await ticket_channel.send(embed=embed, view=view)
+    await interaction.response.send_message(f"✅ Destek talebiniz oluşturuldu: {ticket_channel.mention}", ephemeral=True)
 
 class TicketManagementView(discord.ui.View):
     def __init__(self, creator_id: int, ticket_id: int, category_name: str):
@@ -358,8 +482,8 @@ class TicketManagementView(discord.ui.View):
     @discord.ui.button(label="Yetkili - Sahiplen", style=discord.ButtonStyle.primary, emoji="👥", custom_id="ticket_claim")
     async def sahiplen(self, interaction: discord.Interaction, button: discord.ui.Button):
         role = discord.utils.get(interaction.guild.roles, name="Ticket Sorumlusu")
-        if not role or role not in interaction.user.roles:
-            await interaction.response.send_message("❌ Yalnızca **Ticket Sorumlusu** kullanabilir.", ephemeral=True)
+        if not role or (role not in interaction.user.roles and not interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Bu butonu yalnızca **Ticket Sorumlusu** kullanabilir.", ephemeral=True)
             return
 
         self.claimed_by = interaction.user
@@ -371,7 +495,7 @@ class TicketManagementView(discord.ui.View):
         msg = interaction.message
         if msg.embeds:
             emb = msg.embeds[0]
-            emb.description = emb.description.replace("```Yetkili bekleniyor...```", f"```Sahiplenen Yetkili: {interaction.user.name}```")
+            emb.description = emb.description.replace("Sahiplenilmesi bekleniyor...", f"✨ {interaction.user.mention} tarafından sahiplenildi.")
             await msg.edit(embed=emb, view=self)
 
         await interaction.response.send_message(f"✨ Bu ticket **{interaction.user.name}** tarafından üstlenildi!", ephemeral=False)
@@ -379,17 +503,47 @@ class TicketManagementView(discord.ui.View):
     @discord.ui.button(label="Yetkili - Kapat", style=discord.ButtonStyle.secondary, emoji="💾", custom_id="ticket_close_staff")
     async def yetkili_kapat(self, interaction: discord.Interaction, button: discord.ui.Button):
         role = discord.utils.get(interaction.guild.roles, name="Ticket Sorumlusu")
-        if not role or role not in interaction.user.roles:
-            await interaction.response.send_message("❌ Yalnızca **Ticket Sorumlusu** kullanabilir.", ephemeral=True)
+        if not role or (role not in interaction.user.roles and not interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Bu butonu yalnızca **Ticket Sorumlusu** kullanabilir.", ephemeral=True)
             return
         await self.close_ticket(interaction, kapatan="Yetkili")
 
     @discord.ui.button(label="Oyuncu - Kapat", style=discord.ButtonStyle.danger, emoji="⚙️", custom_id="ticket_close_user")
     async def oyuncu_kapat(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.creator_id and not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ Bu butonu sadece talebi açan oyuncu kullanabilir.", ephemeral=True)
+            await interaction.response.send_message("❌ Bu butonu sadece talebi açan oyuncu veya yetkililer kullanabilir.", ephemeral=True)
             return
         await self.close_ticket(interaction, kapatan="Oyuncu")
+
+    @discord.ui.button(label="Yedek Al", style=discord.ButtonStyle.success, emoji="📂", custom_id="ticket_transcript")
+    async def yedek_al(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = discord.utils.get(interaction.guild.roles, name="Ticket Sorumlusu")
+        if not role or (role not in interaction.user.roles and not interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Ticket yedeğini yalnızca **Ticket Sorumlusu** alabilir.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        
+        # Sohbet geçmişini toplama
+        messages_text = f"--- STORM-PACK TICKET YEDEĞİ (#{self.ticket_id}) ---\n"
+        async for msg in interaction.channel.history(limit=500, oldest_first=True):
+            timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            messages_text += f"[{timestamp}] {msg.author.name}: {msg.content}\n"
+
+        file_bytes = io.BytesIO(messages_text.encode("utf-8"))
+        file = discord.File(file_bytes, filename=f"ticket-{self.ticket_id}-yedek.txt")
+
+        log_channel = discord.utils.get(interaction.guild.text_channels, name="📋-ticket-log")
+        if log_channel:
+            log_embed = discord.Embed(
+                title=f"📂 **Ticket Yedeği Alındı (#{self.ticket_id})**",
+                description=f"Alınan Yer: {interaction.channel.name}\nAçan: <@{self.creator_id}>\nYedeği Alan: {interaction.user.mention}",
+                color=discord.Color.blue()
+            )
+            await log_channel.send(embed=log_embed, file=file)
+            await interaction.followup.send("✅ Ticket yedeği başarıyla `📋-ticket-log` kanalına gönderildi.", ephemeral=True)
+        else:
+            await interaction.followup.send("⚠️ `📋-ticket-log` kanalı bulunamadı, dosya gönderilemedi.", ephemeral=True)
 
     async def close_ticket(self, interaction: discord.Interaction, kapatan: str):
         guild = interaction.guild
@@ -408,31 +562,35 @@ class TicketManagementView(discord.ui.View):
             log_embed.timestamp = discord.utils.utcnow()
             await log_channel.send(embed=log_embed)
 
-        await interaction.response.send_message("⚠️ Destek talebi kapatılıyor...", ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("⚠️ Destek talebi kapatılıyor...", ephemeral=True)
+        else:
+            await interaction.followup.send("⚠️ Destek talebi kapatılıyor...", ephemeral=True)
+            
         await interaction.channel.delete()
 
 @bot.tree.command(name="ticketkurulum", description="Destek panelini kurar.")
 @app_commands.checks.has_permissions(administrator=True)
 async def ticket_kurulum(interaction: discord.Interaction, banner_url: str):
     embed = discord.Embed(
-        title="🌟 **STORM PACK DESTEK MERKEZİ** 🌟",
+        title="🛒 **StormPack # Destek & Bilet Sistemi**",
         description=(
-            "✨ **Profesyonel ve Hızlı Destek Altyapısı**\n\n"
-            "Sunucumuzda yaşayabileceğiniz her türlü sorun, öneri, satın alım işlemleri veya partnerlik talepleriniz için doğru yerdesiniz!\n\n"
-            "📋 **Destek Sistemi Kuralları:**\n"
-            "• 🛠️ Aşağıdaki kategorilerden ihtiyacınıza uygun olan butona tıklayarak özel destek kanalı oluşturabilirsiniz.\n"
-            "• ⚠️ Asılsız, botu meşgul edici veya gereksiz destek talebi açmak yasaktır.\n"
-            "• ⏱️ Yetkili ekibimiz en kısa süre içerisinde talebinizle ilgilenecektir.\n\n"
-            "👇 **Destek talebi açmak için aşağıdaki butonları kullanın:**"
+            "Nos Store ürünleri, siparişleriniz, ödemeleriniz veya teknik destek için aşağıdan ilgili kategoriyi seçerek bilet oluşturabilirsiniz.\n\n"
+            "💡 **Hızlı Destek:** Bilet açtıktan sonra sipariş numaranızı veya satın aldığınız ürün adını iletmeniz süreci hızlandıracaktır.\n"
+            "⏱️ Müşteri temsilcilerimiz en kısa sürede talebinizi yanıtlayacaktır.\n\n"
+            "ℹ️ **Müşteri Hizmetleri Kuralları:**\n"
+            "• Satın aldığınız ürünle ilgili fatura/sipariş kodunuzu hazırlayınız.\n"
+            "• Kurulum taleplerinde sunucu bilgilerinizi hazır bulundurunuz.\n"
+            "• Temsilcilerimiz mesai saatleri içerisinde en kısa sürede yanıt verir."
         ),
         color=discord.Color.dark_theme()
     )
     embed.set_image(url=banner_url)
-    embed.set_footer(text="discord.gg/stormpack • Güvenli ve Kesintisiz Destek Altyapısı")
+    embed.set_footer(text="Powered By StormPack - Müşteri Hizmetleri")
 
-    view = TicketSelectView()
+    view = TicketDropView()
     await interaction.channel.send(embed=embed, view=view)
-    await interaction.response.send_message("✅ Büyük destek paneli başarıyla kuruldu.", ephemeral=True)
+    await interaction.response.send_message("✅ StormPack destek paneli başarıyla kuruldu.", ephemeral=True)
 
 @bot.tree.command(name="ticketpanelsifirla", description="Ticket kategorisini ve tüm aktif biletleri temizler.")
 @app_commands.checks.has_permissions(administrator=True)
@@ -528,6 +686,9 @@ async def system_ses_ayril(interaction: discord.Interaction):
 async def on_ready():
     print(f"{bot.user} olarak giriş yapıldı. StormSystem 7/24 aktif!")
 
+# -------------------------------------------------------------
+# 🚀 Bot Çalıştırma ve Keep-Alive Başlatıcı
+# -------------------------------------------------------------
 if __name__ == "__main__":
     keep_alive()
     bot.run(os.getenv("DISCORD_TOKEN"))
